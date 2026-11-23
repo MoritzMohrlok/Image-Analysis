@@ -1,0 +1,501 @@
+---
+title: "Spatial Analysis"
+output: html_document
+date: "2026-07-13"
+---
+
+This script performs the spatial analysis of object coordinates, corresponding to Figure 7 in the BioRxiv pre-print "An experimental model system to investigate microscale mechanisms behind the soil priming effect" (doi: 10.64898/2026.07.14.738410) . We calculate the linearized form of Ripley's K based on object coordinates in a 50 µm radius around each object. The results are further processed in the Data_Processing.rmd provided in the related Zenodo archive (doi: 10.5281/zenodo.21353091). 
+
+
+```{r setup}
+
+library(spatstat)
+library(tidyverse)
+library(readxl)
+library(broom)
+
+# Initialize file system
+setwd("...") # Path pointing to folder structure
+
+path_coordinates <- ".../Measurements/Coordinates/Stationary/Fixed_Threshold/"
+
+# Import metadata
+
+ROI_shapes <- read.csv(".../Metadata/ROI_shapes.csv")
+
+meta_Chips <- read_xlsx(".../Metadata/Meta_Chips.xlsx")
+
+# Individual object data for distributions
+objects <- data.table::fread(".../Processed/Individual_Objects.csv")
+
+```
+
+
+# Object correction
+
+First, large objects corresponding to cell clusters which are otherwise reduced to a single coordinate due to lack of resolution of our high-throughput imaging method are corrected. For this, we estimated an average density of bacteria in dense clusters from manually taken higher-resolution microscopy images. Using this average value, we then simulate the distribution of bacteria within the fitted ellipse (by ImageJ) of objects larger than 1 SD from the mean object size. We add a check to make sure no simulated points share the same coordinates as this poses a problem later on.
+
+
+```{r Object Correction - Functions}
+
+#######################
+# Function for simulating points in an ellipse around a centroid
+# cx = X coordinate of Centroid
+# cy = Y Coordinate of Centroid
+# a = major of best-fitting ellipse (from imageJ)
+# b = minor of best-fitting ellipse
+# angle_deg = rotation angle of ellipse relative to x-axis (CHECK)
+# n_points = Cells per Area
+# Obj_nr = Unique number of object in data
+#######################
+
+generate_points_in_ellipse <- function(cx, cy, a, b, angle_deg, n_points, Obj_nr, max_attempts, LB, Cell, Rep) {
+
+  for (i in 1:max_attempts) {
+    
+  print(i)  
+    
+  angle_rad <- angle_deg * pi / 180
+  theta <- runif(n_points, 0, 2 * pi)
+  r <- sqrt(runif(n_points))  # uniform in ellipse
+  x_local <- r * a/2 * cos(theta)
+  y_local <- r * b/2 * sin(theta)
+  
+  # rotate and shift
+  x_rot <- x_local * cos(angle_rad) - y_local * sin(angle_rad)
+  y_rot <- x_local * sin(angle_rad) + y_local * cos(angle_rad)
+  
+  # Shift coordinates and round them
+  x_out <- round(cx + x_rot)
+  y_out <- round(cy + y_rot)
+  
+  out <- data.frame(X = x_out,
+           Y = y_out,
+           LB_Concentration = LB,
+           CMC = Cell,
+           Bio_rep = Rep,
+           Pointtype = "Simulated",
+           Object_Nr = Obj_nr)
+  
+  out_unique <- out[!duplicated(out[c("X", "Y")]), ]
+
+  # Check overlapping points, repeat loop if yes
+    coords_df <- data.frame(x = out_unique$X, y = out_unique$Y)
+
+    if (nrow(coords_df) == nrow(unique(coords_df))) {
+      
+      print("ok")
+      return(out_unique)
+    }
+    
+
+  }
+ 
+     warning(paste("Could not generate non-overlapping points after", max_attempts, "attempts. Returning best-effort."))
+     return(out[!duplicated(out), ])  # Return without duplicates as fallback
+}
+
+#######################
+# Function to simulate the corrected point pattern using above formula
+#######################
+
+simulate_pattern <- function(Active_Chip, Tp, Movement_Type, in_path, metadata, size_threshold, image_scale, mean_cells_per_area){
+  
+  #######################
+  # Data import
+  #######################
+  
+  # Get metadata for current chip
+  Active_meta <- filter(metadata, Chip == Active_Chip)
+  
+  CMC <- Active_meta$CMC[1]
+  LB_Concentration <- Active_meta$LB_Concentration[1]
+  Bio_rep <- Active_meta$Bio_rep[1]
+  
+  # Create empty dataframe to return in case of error
+  out_error <- data.frame(X = NA,
+                          Y = NA,
+                          LB_Concentration = LB_Concentration,
+                          CMC = CMC,
+                          Bio_rep = Bio_rep,
+                          Pointtype = NA,
+                          Object_Nr = NA)
+  
+  
+  # Load data
+  in_path_2 <- paste0(in_path, Active_Chip, "/", Active_Chip, "_", Tp, ".csv")
+  
+  
+  checkfile <- file.exists(in_path_2)
+  
+  if(checkfile == FALSE){
+    
+    return(out_error)
+        
+  }else if(checkfile == TRUE){
+    
+      # return empty dataframe if Coords is empty
+      Coords <- tryCatch({read.csv(in_path_2)}, error = function(e){
+        
+        print("CSV empty, returning NA")
+        return("Empty")
+        
+      })
+      
+      # Check for empty image, return NA dataframe if yes, otherwise proceed
+      
+      if(is.character(Coords) == TRUE){
+        
+        return(out_error)
+            
+        
+      }else{           
+        
+        #######################
+        # Get Objects
+        #######################
+        
+        # Filter object data
+        Active_objects <- filter(objects, Chip == Active_Chip & Timepoint == Tp & Type == Movement_Type)
+        
+        # Add coordinates to object data
+        names(Coords)[names(Coords) == 'X.1'] <- 'Object_Nr'
+        merge_dat <- select(Coords, c(Object_Nr, X, Y))
+        
+        Active_objects <- merge(Active_objects, merge_dat, by = "Object_Nr")
+      
+        # Select all objects that have an area larger than the global mean + 1 SD (size_threshold)
+        large_objs <- Active_objects[Active_objects$Area > size_threshold, ]
+        small_objs <- Active_objects[Active_objects$Area <= size_threshold, ]
+        
+        # Check if there are large objects defined this way, if not, just return the small objects. If yes, proceed
+        check <- nrow(large_objs)
+        print(paste0("There were ", check, " large objects detected"))
+        
+        if(check == 0){
+          
+          small_objs$Pointtype <- "Original Small Object"
+          out <- small_objs
+          
+          # Select same columns as in case when there are big objects
+          out <- select(out, c(X, Y, LB_Concentration, CMC, Bio_rep, Pointtype, Object_Nr))
+          
+          print("No large objects detected!")
+          return(out)
+          
+        } else{
+            
+            print("Large objects detected, proceeding...")
+            large_objs$Pointtype <- "Centroid of Large Object"
+            small_objs$Pointtype <- "Original Small Object"
+            
+            #mean_cells_per_area <- 5 #  MEASURE THIS  // MEAN NUMBER OF CELLS PER AREA // Globalize!
+            large_objs$estimated_cells <- round(large_objs$Area * mean_cells_per_area) 
+          
+            
+            #######################
+            # Apply function to all large objects in image
+            #######################
+            
+            out_list <- list()
+            a <- 1
+            
+            for (i in 1:nrow(large_objs)) {
+              print(i)
+              x <- large_objs[i,]
+              active_object <- x$Object_Nr[[1]]
+              out <- generate_points_in_ellipse(cx = x$X,
+                                                cy = x$Y,
+                                                a = x$Major / image_scale,   # Correct the axis by scale (seems to be imported as pixels and not µm)
+                                                b = x$Minor / image_scale,
+                                                angle_deg = 180 - x$Angle,  # Correct the angle of imageJ export
+                                                n_points = x$estimated_cells,
+                                                Obj_nr = active_object,
+                                                max_attempts = 100,
+                                                LB = LB_Concentration,
+                                                Cell = CMC,
+                                                Rep = Bio_rep)
+              out_list[[a]] <- out
+              a <- a+1
+            }
+            
+            out <- do.call(rbind, out_list)
+            
+            # Combine small objects with newly simulated large objects
+            
+            small_objs <- select(small_objs, colnames(out))
+            
+            objects_new <- rbind(small_objs, out)
+            
+            # Return the data
+            return(objects_new)
+            
+            }
+      
+      }
+  }
+}
+ 
+```
+
+
+
+```{r Object Correction - Application}
+
+# Global settings
+
+# Average amount of cells per µm2, extracted manually from 63x images
+cells_per_area <- 0.14
+
+# Image scale (µm/pixel)
+scale <- 0.3213865
+
+# Calculate Size Threshold
+global_mean <- mean(objects$Area)
+global_sd <- sd(objects$Area)
+
+max_size <- global_mean + global_sd
+
+# Apply function to all images
+Tps <- c("t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9", "t10", "t11", "t12", "t13", "t14", "t15", "t16", "t17", "t18", "t19", "t20")
+Chips <- seq(1,32,1)
+
+out_list <- list()
+a <- 1
+
+for (i in Chips) {
+  print(i)
+  for (n in Tps) {
+    
+      if(i == 6 & n == "t20"){   # Skip missing image
+    i = i+1
+  }
+   
+    print(n)
+    x <- simulate_pattern(Active_Chip = i,
+                          Tp = n,
+                          Movement_Type = "Stationary",
+                          in_path = path_coordinates,  # Stationary anyways
+                          metadata = meta_Chips,
+                          size_threshold = max_size,
+                          image_scale = scale,
+                          mean_cells_per_area = cells_per_area)
+    
+    x$Chip <- i
+    x$Timepoint = n
+    
+    out_list[[a]] <- x
+    a <- a+1
+    
+  }
+
+  
+}
+
+corrected_points <- do.call(rbind, out_list)
+
+write.csv(corrected_points, ".../Processed/Spatial_Analysis/Object_Corrected/Results/Adjusted_Coordinates.csv")
+
+```
+
+# Calculate Ripley's K
+
+This function loads the corrected coordinates of all stationary cells of a specific timepoint of a specific chip. A planar point pattern is then created, with the cellulose area polygon as window. The linearized K function (spatstat::Lest) is calculated for this point pattern with "Ripleys" border correction (best for polygons) and an envelope is calculated for plotting based on 99 random simulations (similar to a confidence interval). If the resulting line of real data deviates from the theoretical distribution assuming complete spatial randomness (CSR) and the calculated envelope, we can assume clustering (if the measured line is above the theoretical) or repelling (if its below the simulated line). 
+
+Two tests, the dclf and mad tests, are calculated to test if the deviation from CSR is statistically significant or not. 
+
+All results are appended with metadata and exported as a list to be stored and used further. Test results and point patterns are saved in addition. Results are further processed in the "Data_Processing.rmd".
+
+In the case of no cells being present in an image, empty dataframes with the same columns but "NA" as value are created. 
+
+Images with less than 15 points are removed as they could be biased according to https://www.rdocumentation.org/packages/spatstat.core/versions/2.3-1/topics/Kest
+
+Note: Running this chunk can take multiple days to finish on a standard office PC. We provide the.rds after running the function as "Results_040825.rds" in the archve.
+
+
+```{r}
+
+spatial_analysis_large_objects_corrected <- function(Active_Chip, Tp, Coords_Corrected, in_path, shapes, metadata, out_path){
+  
+    # Create output directory if it does not exist
+  dir_out <<- paste0(out_path, "/Object_Corrected/", Active_Chip, "/")
+  if (!dir.exists(dir_out)) dir.create(dir_out, recursive = TRUE)  
+  
+  # Internal function to add metadata to dataframe
+  
+  add_info <- function(x){
+    x$CMC <- CMC
+    x$LB_Concentration <- LB_Concentration
+    x$Bio_rep <- Bio_rep
+    x$Timepoint <- Tp
+    x$Check <- Check
+    
+    
+    return(x)
+  }
+  
+  # Get metadata for current chip
+  Active_meta <- filter(metadata, Chip == Active_Chip)
+  
+  CMC <- Active_meta$CMC[1]
+  LB_Concentration <- Active_meta$LB_Concentration[1]
+  Bio_rep <- Active_meta$Bio_rep[1]
+  
+  # Extract shape data of active chip and timepoint
+  shape <- filter(shapes, Chip == Active_Chip & Timepoint == Tp)
+  
+  # Define window
+  win <- owin(poly = list(x = shape$x, y = shape$y))   
+  
+    # get coordinate data
+  Coords <- filter(Coords_Corrected, Chip == Active_Chip & Timepoint == Tp)
+  
+  # Save a plot of the Coordinates
+  
+   # All points
+  p <- ggplot(Coords, aes(x = X, y = Y, color = Pointtype))+
+    geom_point()+
+    scale_y_reverse()+
+    theme_bw(base_size = 10)+
+      theme(axis.line=element_blank(),axis.text.x=element_blank(),
+        axis.text.y=element_blank(),axis.ticks=element_blank(),
+        axis.title.x=element_blank(),
+        axis.title.y=element_blank(),legend.position="none", aspect.ratio = 1)
+  
+  ggsave(paste0(dir_out, Tp, "_Points_in_Space.svg"), device = "svg", width = 12, height = 12, units = "cm")
+  
+  # Create Check variable
+  
+  if(nrow(Coords) == 0){Check <- "No Observations"} else if(nrow(Coords) < 15){
+    Check <- "Less than 15 Observations"
+  }else {Check <- "Ok"}
+  
+  if(nrow(Coords) > 0){
+    
+  ppp_x <- select(Coords, c("X", "Y"))
+  
+  # Create point pattern object  
+  ppp_x <- ppp(x = ppp_x$X, y = ppp_x$Y, window = win)
+  
+  # save point pattern object
+  saveRDS(ppp_x, paste0(dir_out, Tp, "_ppp.rds"))
+  
+  if(Check != "Less than 15 Observations"){  # Proceed with calculation if checks are ok
+  
+    r_vals <- seq(0, 50, by = 0.05)  
+      
+    # Calcluate linearized K function with envelope
+    L <- envelope(ppp_x, fun = Linhom, nrank = 1, correction = "Ripley", r = r_vals)
+    plot(L, main = paste0("Chip ", Active_Chip, ", Timepoint ", Tp))
+    
+    # Save plot as pdf
+    pdf(file = paste0(dir_out, Tp, "_L.pdf"))
+    plot(L, main = paste0("Chip ", Active_Chip, ", Timepoint ", Tp))
+    dev.off()
+    
+    # Add metadata
+    L <- add_info(L)
+    
+    # Statistical Test
+    
+    dclf <- dclf.test(ppp_x, Linhom, nsim = 99, rinterval  = c(min(r_vals), max(r_vals)))
+    stat_test_dclf <- tidy(dclf) %>% select(1:3)
+    
+    mad <- mad.test(ppp_x, Linhom, nsim = 99)
+    stat_test_mad <- tidy(mad) %>% select(1:3)
+    
+    stat_test <- data.frame("Test_Statistic" = c(stat_test_dclf$statistic$u, stat_test_mad$statistic$mad), 
+                            "rank" = c(stat_test_dclf$statistic$rank, stat_test_mad$statistic$rank), 
+                            "p" = c(stat_test_dclf$p.value, stat_test_mad$p.value), 
+                            "method" = c(stat_test_dclf$method1, stat_test_mad$method1)) 
+    
+    stat_test <- add_info(stat_test)
+    
+    write.csv(stat_test, paste0(dir_out, Tp, "_stats.csv"))
+    
+  } else{  # Return empty dataframe in case checks failed to avoid errors when running the function in a loop
+      
+    L <- data.frame("r" = NA, "obs" = NA, "theo" = NA, "lo" = NA, "hi" = NA)
+    L <- add_info(L)
+    
+    stat_test <- data.frame("Test_Statistic" = NA, "rank" = NA, "p" = NA, "method" = NA) 
+    stat_test <- add_info(stat_test)
+    
+    stat_test <- add_info(stat_test)
+  
+    write.csv(stat_test, paste0(dir_out, Tp, "_stats.csv"))
+    }
+    
+  out <- list("L" = L, "Stats" = stat_test)
+  
+  }else { # fallback
+  
+  L <- data.frame("r" = NA, "obs" = NA, "theo" = NA, "lo" = NA, "hi" = NA)
+  L <- add_info(L)
+   
+  stat_test <- data.frame("Test_Statistic" = NA, "rank" = NA, "p" = NA, "method" = NA) 
+  stat_test <- add_info(stat_test)
+  
+  out <- list("L" = L, "Stats" = stat_test)
+  }
+  
+    return(out)
+}
+
+# Import corrected coordinates created above
+corrected_points <- data.table::fread(".../Processed/Spatial_Analysis/Object_Corrected/Results/Adjusted_Coordinates.csv")
+
+# Apply function to all images
+
+Tps <- c("t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9", "t10", "t11", "t12", "t13", "t14", "t15", "t16", "t17", "t18", "t19", "t20")
+Chips <- seq(1,32,1)
+
+out_list <- list()
+a <- 1
+
+for (i in Chips) {
+  print(i)
+  for (n in Tps) {
+    
+      if(i == 6 & n == "t20"){ # skip missing image
+    i = i+1
+  }
+    
+    print(n)
+    x <- spatial_analysis_large_objects_corrected(i, n, corrected_points, path_coordinates, ROI_shapes, meta_Chips)
+    out_list[[a]] <- x
+    a <- a+1
+    
+  }
+  
+  
+}
+
+# Save RDS as it takes a long time to run
+saveRDS(out_list, ".../Processed/Spatial_Analysis/Object_Corrected/Results/Results_040825.rds")
+
+# Process and export data
+
+L_df     <- do.call(rbind, lapply(out_list, function(x) x$L))
+Stats_df <- do.call(rbind, lapply(out_list, function(x) x$Stats))
+
+# Filter out < 15 observations from L data
+L_df <- filter(L_df, Check != "Less than 15 Observations")
+
+# Add time data
+time_dat <- read_csv(".../Metadata/Timeline.csv") %>% select(c(Chip, Timepoint, time_h)) %>% group_by(Timepoint) %>% summarize(time_h = mean(time_h))
+
+L_df <- merge(L_df, time_dat, by = "Timepoint")
+
+write.csv(L_df, ".../Processed/Object_Corrected/Results/L_040825.csv")
+write.csv(Stats_df, ".../Processed/Object_Corrected/Results/stats_040825.csv")
+
+
+
+```
+
+
+
+
+
+
