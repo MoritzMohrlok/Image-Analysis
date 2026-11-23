@@ -1,0 +1,24 @@
+# License
+
+Copyright © 2026 Moritz Mohrlok and Christina Kaiser, University of Vienna
+
+The code and documentation in this repository are licensed under the
+**Creative Commons Attribution 4.0 International License (CC BY 4.0)**.
+
+Full license text: https://creativecommons.org/licenses/by/4.0/legalcode
+
+You are free to share and adapt this material for any purpose, including
+commercially, as long as you give appropriate credit, provide a link to the
+license, and indicate if changes were made.
+
+## Origin and citation
+
+This code is also archived on Zenodo as part of the dataset accompanying the
+preprint below. If you use it, please cite both:
+
+- Mohrlok, M. & Kaiser, C. (2026): An experimental model system to investigate
+  microscale mechanisms behind the soil priming effect. bioRxiv.
+  https://doi.org/10.64898/2026.07.14.738410
+- Mohrlok, M. & Kaiser, C. (2026): Dataset for the article "An experimental
+  model system to investigate microscale mechanisms behind the soil priming
+  effect". Zenodo. https://doi.org/10.5281/zenodo.21353091
