@@ -1,2 +1,14 @@
-# Image-Analysis
+# Image-Analysis-Correction
 This repository contains scripts related to the BioRxiv preprint "An experimental model system to investigate microscale mechanisms behind the soil priming effect" (https://doi.org/10.64898/2026.07.14.738410)  
+
+## Introduction
+In the study, a fluorescently labelled strain of Bacillus subtilis was grown on a transparent, cellulose-containing agar film inside a microfluidic chamber. We then tested what happens when growth medium (LB broth) is added in different concentrations (0, 0.1, 1 and 10% of the standard formulation), trying to recreate the priming effect in soil in this synthetic model system. Using fluorescene microscopy, we created a time-series of the bacteria living on the substrate patch and derive different measurements from the Images by processing them using ImageJ macros and R scripts. This repository only showcases the algorithm used to correct a problem during image aquisition, outlined in more detail below. The complete analysis is described in the manuscript and can be reproduced with the data and scripts provided in the Zenodo archive (10.5281/zenodo.21353091).  
+
+## The Problem
+Spatial organisation of the bacteria plays an important role in complex substrate (such as cellulose) decomposition. Bacterial growth, induced by the addition of growth medium, increases bacterial density, potentially reducing diffusive losses of enzymes, decompositon products and signal molecules, increasing decomposition efficency of the community. We tested spatial self-organisation of the studied bacteria in our experimental treatments by analysing the coordinates of individual cells using Ripley's K, which compares the distribution of points (bacteria) within a certain radius to the distribution expected under complete spatial randomness, given the total number of points in an observation window. We optimized our image aquisiton setup for speed as the large size of the chamber (~ 2 x 3 mm) required the stitching together of multiple fields of view, reducing our ability to resolve individual cells in larger cell clusters. These large areas are then reduced to a single coordinate in the spatial data, introducing a bias and skewing the subsequent analysis. 
+
+## A Solution
+To reduce this bias, we utilized images of colonies taken at higher magnification (where individual cells could be identified) and estimated the average cell density within such colonies. We then came up with an algorithm that takes each image, identifies large objects, draws the best-fitting ellipses around the centroids of the objects and then simulates the expected distribution of bacteria within them. This algorithm was implemented with the help of an LLM (ChatGPT-4o) This corrected data was then fed into a pipeline doing the spatial analysis. Provided is a commented RMarkdown file with the relevant code. 
+
+
+
